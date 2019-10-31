@@ -44,8 +44,8 @@ func main() {
 		trees   int
 		queries int
 	}
-	flag.StringVar(&opts.mysql, "mysql", "", "mysql dsn")
-	flag.StringVar(&opts.tidb, "tidb", "", "tidb dsn")
+	flag.StringVar(&opts.mysql, "mysql", "root:@tcp(127.0.0.1:3306)/spider", "mysql dsn")
+	flag.StringVar(&opts.tidb, "tidb", "root:@tcp(127.0.0.1:4000)/spider", "tidb dsn")
 	flag.IntVar(&opts.trees, "trees", 10, "number of tree")
 	flag.IntVar(&opts.queries, "queries", 5, "queries per tree")
 	flag.Parse()
@@ -67,6 +67,8 @@ func main() {
 	perror(err)
 	r.outInconsistency, err = os.OpenFile("out_diff.out", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	perror(err)
+	r.consistency, err = os.OpenFile("query.sql", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	perror(err)
 
 	t := time.Now()
 
@@ -86,6 +88,7 @@ func perror(err error) {
 type Runner struct {
 	errInconsistency io.Writer
 	outInconsistency io.Writer
+	consistency io.Writer
 
 	mydb *sql.DB
 	tidb *sql.DB
@@ -165,6 +168,9 @@ func (r *Runner) Run(t util.Tree) {
 			r.outInconsistency.Write([]byte("\n> ACTUAL\n"))
 			r.outInconsistency.Write([]byte(actBR.convertToString()))
 			r.outInconsistency.Write([]byte("\n"))
+		} else {
+			r.consistency.Write([]byte(q))
+			r.consistency.Write([]byte("\n\n"))
 		}
 	}
 }

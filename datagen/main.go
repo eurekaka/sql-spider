@@ -36,7 +36,7 @@ CREATE TABLE t (
 			optional(.9, genString), optional(.9, genDatetime))
 		fmt.Println(insert)
 	}
-
+	fmt.Println(`analyze table t;`)
 }
 
 func genInt() string {
