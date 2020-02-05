@@ -94,7 +94,7 @@ func (r *ReplaceChildToFunc) OneStep(node Expr, ctx TransformContext) []Expr {
 			fmt.Printf("ReplaceChildToFunc child size:%d id:%d\n", len(e.children), ctx.ReplaceChildIdx)
 			fmt.Printf("node:%s\n", node.ToSQL())
 			newNode := node.Clone().(*Func)
-			newNode.children[ctx.ReplaceChildIdx] = GenExpr(e.children, TypeMask(e.children[ctx.ReplaceChildIdx].RetType()), MustContainCols)
+			newNode.children[ctx.ReplaceChildIdx], _ = GenExpr(e.children, TypeMask(e.children[ctx.ReplaceChildIdx].RetType()), MustContainCols)
 			result = append(result, newNode)
 		}
 	}

@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"math/rand"
-	"time"
+
+	"github.com/zyguan/sql-spider/util"
 )
 
 func main() {
@@ -29,41 +29,14 @@ CREATE TABLE t (
 );`
 	fmt.Println(dropTable)
 	fmt.Println(createTable)
-	n := 100
+	n := 100000
 	for i := 0; i < n; i++ {
 		insert := fmt.Sprintf(`INSERT IGNORE INTO t values (%v, %v, %v, %v, %v);`,
-			optional(.9, genInt), optional(.9, genDouble), optional(.9, genDecimal),
-			optional(.9, genString), optional(.9, genDatetime))
+			optional(.9, util.GenIntLiteral), optional(.9, util.GenRealLiteral), optional(.9, util.GenRealLiteral),
+			optional(.9, util.GenStringLiteral), optional(.9, util.GenDateTimeLiteral))
 		fmt.Println(insert)
 	}
-
-}
-
-func genInt() string {
-	return fmt.Sprintf("%v", int64(math.MaxInt64*rand.Float64()))
-}
-
-func genDouble() string {
-	return fmt.Sprintf("%v", rand.Float64())
-}
-
-func genDecimal() string {
-	return fmt.Sprintf("%v", math.MaxFloat64*rand.Float64())
-}
-
-func genString() string {
-	n := rand.Intn(10) + 1
-	buf := make([]byte, 0, n)
-	for i := 0; i < n; i++ {
-		x := rand.Intn(26)
-		buf = append(buf, byte('a'+x))
-	}
-	return "'" + string(buf) + "'"
-}
-
-func genDatetime() string {
-	t := time.Unix(rand.Int63n(2000000000), rand.Int63n(30000000000))
-	return t.Format("'2006-01-02 15:04:05'")
+	fmt.Println(`analyze table t;`)
 }
 
 func optional(p float64, f func() string) string {

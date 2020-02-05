@@ -2,10 +2,10 @@ package util
 
 import (
 	"fmt"
-	"math"
 	"math/rand"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -180,6 +180,13 @@ func (c Constant) ToSQL() string {
 	return c.val
 }
 
+func (c Constant) ToString() string {
+	if c.val[:1] == "'" {
+		return c.val
+	}
+	return "'" + c.val + "'"
+}
+
 func (c Constant) Clone() Expr {
 	return Constant{c.val, c.retType}
 }
@@ -216,8 +223,11 @@ func (c Column) RetType() Type {
 type Node interface {
 	Columns() []Expr
 	ToBeautySQL(level int) string
+	ToExecuteStmts(cnt int) []string
 	ToString() string
 	Children() []Node
+	ParamCnt() int
+	SetParamCnt(cnt int)
 	Clone() Node
 	AddChild(node Node)
 }
@@ -254,10 +264,20 @@ func (m NodeTypeMask) Remove(tp NodeType) NodeTypeMask {
 
 type baseNode struct {
 	children []Node
+	paramCnt int
+	stmtName string
 }
 
 func (b *baseNode) Children() []Node {
 	return b.children
+}
+
+func (b *baseNode) ParamCnt() int {
+	return b.paramCnt
+}
+
+func (b *baseNode) SetParamCnt(cnt int) {
+	b.paramCnt = cnt
 }
 
 func (b *baseNode) clone() *baseNode {
@@ -265,11 +285,47 @@ func (b *baseNode) clone() *baseNode {
 	for _, c := range b.children {
 		xs = append(xs, c.Clone())
 	}
-	return &baseNode{xs}
+	return &baseNode{
+		children: xs,
+		paramCnt: b.paramCnt,
+		stmtName: "",
+	}
 }
 
 func (b *baseNode) AddChild(node Node) {
 	b.children = append(b.children, node)
+}
+
+var stmtNo uint32
+
+func (b *baseNode) addPrepare(level int, sql string) string {
+	if level > 0 {
+		return sql
+	}
+	no := atomic.AddUint32(&stmtNo, 1)
+	b.stmtName = "stmt" + fmt.Sprintf("%v", no)
+	return "prepare " + b.stmtName + " from \"" + sql + "\""
+}
+
+func (b *baseNode) ToExecuteStmts(cnt int) []string {
+	stmts := make([]string, 2*cnt)
+	for i := 0; i < 2*cnt; i = i+2 {
+		setStr := "set "
+		execStr := "execute " + b.stmtName + " using "
+		for j := 0; j < b.paramCnt; j++ {
+			val := GenConstant(TypeDefault).ToString()
+			end := ","
+			if j == b.paramCnt - 1 {
+				end = ";"
+			}
+			param := "@p" + fmt.Sprintf("%v", j)
+			setStr = setStr + param + "=" + val + end
+			execStr = execStr + param + end
+		}
+		stmts[i] = setStr
+		stmts[i+1] = execStr
+	}
+	return stmts
 }
 
 type Filter struct {
@@ -282,8 +338,9 @@ func (f *Filter) Columns() []Expr {
 }
 
 func (f *Filter) ToBeautySQL(level int) string {
-	return "SELECT * FROM (" +
-		f.children[0].ToBeautySQL(level) + ") t WHERE " + f.Where.ToSQL()
+	sql := "SELECT * FROM (\n" +
+		f.children[0].ToBeautySQL(level+1) + ") t WHERE " + f.Where.ToSQL()
+	return f.baseNode.addPrepare(level, sql)
 }
 
 func (f *Filter) Clone() Node {
@@ -323,9 +380,10 @@ func (p *Projector) ToBeautySQL(level int) string {
 	for i, e := range p.Projections {
 		cols[i] = e.ToSQL() + " AS c" + strconv.Itoa(i)
 	}
-	return strings.Repeat(" ", level) + "SELECT " + strings.Join(cols, ", ") + " FROM (\n" +
+	sql := strings.Repeat(" ", level) + "SELECT " + strings.Join(cols, ", ") + " FROM (\n" +
 		p.children[0].ToBeautySQL(level+1) + "\n" +
 		strings.Repeat(" ", level) + ") AS t"
+	return p.baseNode.addPrepare(level, sql)
 }
 
 func (p *Projector) Clone() Node {
@@ -362,7 +420,8 @@ func (o *OrderBy) ToBeautySQL(level int) string {
 		orderBy = append(orderBy, e.ToSQL())
 	}
 
-	return "SELECT * FROM (" + o.children[0].ToBeautySQL(level+1) + ") t ORDER BY " + strings.Join(orderBy, ", ")
+	sql := "SELECT * FROM (" + o.children[0].ToBeautySQL(level+1) + ") t ORDER BY " + strings.Join(orderBy, ", ")
+	return o.baseNode.addPrepare(level, sql)
 }
 
 func (o *OrderBy) Clone() Node {
@@ -398,7 +457,8 @@ func (l *Limit) Columns() []Expr {
 }
 
 func (l *Limit) ToBeautySQL(level int) string {
-	return l.children[0].ToBeautySQL(level) + " LIMIT " + strconv.Itoa(l.Limit)
+	sql := l.children[0].ToBeautySQL(level+1) + " LIMIT " + strconv.Itoa(l.Limit)
+	return l.baseNode.addPrepare(level, sql)
 }
 
 func (l *Limit) Clone() Node {
@@ -444,9 +504,10 @@ func (a *Agg) ToBeautySQL(level int) string {
 	if len(groupBy) == 0 {
 		groupBySQL = ""
 	}
-	return strings.Repeat(" ", level) + "SELECT " + strings.Join(aggs, ", ") + " FROM (\n" +
+	sql := strings.Repeat(" ", level) + "SELECT " + strings.Join(aggs, ", ") + " FROM (\n" +
 		a.children[0].ToBeautySQL(level+1) + "\n" +
 		strings.Repeat(" ", level) + ") AS t " + groupBySQL
+	return a.baseNode.addPrepare(level, sql)
 }
 
 func (a *Agg) Clone() Node {
@@ -495,10 +556,11 @@ func (j *Join) ToBeautySQL(level int) string {
 	for i := 0; i < rLen; i++ {
 		cols[i+lLen] = "t2.c" + strconv.Itoa(i) + " AS " + "c" + strconv.Itoa(i+lLen)
 	}
-	return strings.Repeat(" ", level) + "SELECT " + strings.Join(cols, ",") + " FROM (\n" +
+	sql := strings.Repeat(" ", level) + "SELECT " + strings.Join(cols, ",") + " FROM (\n" +
 		l.ToBeautySQL(level+1) + ") AS t1, (\n" +
 		r.ToBeautySQL(level+1) + ") AS t2\n" +
 		strings.Repeat(" ", level) + " WHERE " + j.JoinCond.ToSQL()
+	return j.baseNode.addPrepare(level, sql)
 }
 
 func (j *Join) Clone() Node {
@@ -540,7 +602,8 @@ func (t *Table) ToBeautySQL(level int) string {
 	for i, idx := range t.SelectedColumns {
 		cols[i] = t.Schema.Columns[idx].col + " AS c" + strconv.Itoa(i)
 	}
-	return strings.Repeat(" ", level) + "SELECT " + strings.Join(cols, ", ") + " FROM " + t.Schema.Name
+	sql := strings.Repeat(" ", level) + "SELECT " + strings.Join(cols, ", ") + " FROM " + t.Schema.Name
+	return t.baseNode.addPrepare(level, sql)
 }
 
 func (t *Table) Clone() Node {
@@ -578,13 +641,13 @@ func GenConstant(tp TypeMask) Constant {
 	ct = tps[t]
 	switch ct {
 	case ETInt:
-		cv = genIntLiteral()
+		cv = GenIntLiteral()
 	case ETReal, ETDecimal:
-		cv = genRealLiteral()
+		cv = GenRealLiteral()
 	case ETString:
-		cv = genStringLiteral()
+		cv = GenStringLiteral()
 	case ETDatetime:
-		cv = genDateTimeLiteral()
+		cv = GenDateTimeLiteral()
 	default:
 		ct = tp.Any()
 		cv = "NULL"
@@ -592,25 +655,29 @@ func GenConstant(tp TypeMask) Constant {
 	return NewConstant(cv, ct)
 }
 
-func genDateTimeLiteral() string {
-	t := time.Unix(rand.Int63n(2000000000), rand.Int63n(30000000000))
+func GenParam(tp TypeMask) Constant {
+	tps := tp.All()
+	t := rand.Intn(len(tps))
+	return NewConstant("?", tps[t])
+}
+
+func GenDateTimeLiteral() string {
+	t := time.Unix(2000000000 + rand.Int63n(10), 30000000000 + rand.Int63n(5))
 	return t.Format("'2006-01-02 15:04:05'")
 }
 
-func genIntLiteral() string {
-	return fmt.Sprintf("%v", int64(float64(math.MaxInt64)*rand.Float64()))
+func GenIntLiteral() string {
+	return fmt.Sprintf("%d", rand.Int63n(50))
 }
 
-func genRealLiteral() string {
-	//return fmt.Sprintf("%.6f", rand.Float64())
-	base := math.Pow(10, float64(10-rand.Intn(20)))
-	return fmt.Sprintf("%.3f", base*(rand.Float64()-0.5))
+func GenRealLiteral() string {
+	return fmt.Sprintf("%.2f", rand.Float64())
 }
 
-func genStringLiteral() string {
-	n := rand.Intn(10) + 1
-	buf := make([]byte, 0, n)
-	for i := 0; i < n; i++ {
+func GenStringLiteral() string {
+	// n := rand.Intn(10) + 1
+	buf := make([]byte, 0, 2)
+	for i := 0; i < 2; i++ {
 		x := rand.Intn(62)
 		if x < 26 {
 			buf = append(buf, byte('a'+x))
@@ -623,9 +690,9 @@ func genStringLiteral() string {
 	return "'" + string(buf) + "'"
 }
 
-func GenExpr(cols []Expr, tp TypeMask, validate ValidateExprFn) Expr {
-	var gen func(lv int, tp TypeMask, validate ValidateExprFn) Expr
-	gen = func(lv int, tp TypeMask, validate ValidateExprFn) Expr {
+func GenExpr(cols []Expr, tp TypeMask, validate ValidateExprFn) (Expr, int) {
+	var gen func(lv int, tp TypeMask, validate ValidateExprFn) (Expr, int)
+	gen = func(lv int, tp TypeMask, validate ValidateExprFn) (Expr, int) {
 		count := 10000
 		for count > 0 {
 			count--
@@ -644,13 +711,13 @@ func GenExpr(cols []Expr, tp TypeMask, validate ValidateExprFn) Expr {
 				if !validate(expr) {
 					continue
 				}
-				return expr
+				return expr, 0
 			case Const:
-				expr := GenConstant(tp)
+				expr := GenParam(tp)
 				if !validate(expr) {
 					continue
 				}
-				return expr
+				return expr, 1
 			default:
 				fnSpec := FuncInfos[f]
 				n := fnSpec.MinArgs
@@ -660,13 +727,15 @@ func GenExpr(cols []Expr, tp TypeMask, validate ValidateExprFn) Expr {
 				expr := &Func{Name: f}
 				expr.SetRetType(fnSpec.ReturnType)
 				ok := true
+				paramCnt := int(0)
 				for i := 0; i < n; i++ {
-					subExpr := gen(lv+1, fnSpec.ArgTypeMask(i, expr.Children()), RejectAllConstatns)
+					subExpr, cnt := gen(lv+1, fnSpec.ArgTypeMask(i, expr.Children()), RejectAllConstatns)
 					if subExpr == nil {
 						ok = false
 						break
 					}
 					expr.AppendArg(subExpr)
+					paramCnt += cnt
 				}
 				if !ok {
 					continue
@@ -677,10 +746,27 @@ func GenExpr(cols []Expr, tp TypeMask, validate ValidateExprFn) Expr {
 				if fnSpec.Validate != nil && !fnSpec.Validate(expr) {
 					continue
 				}
-				return expr
+				return expr, paramCnt
 			}
 		}
 		panic("???")
 	}
 	return gen(0, tp, validate)
+}
+
+func SafePrint(t Tree) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("============================")
+			fmt.Println(t.ToString())
+			fmt.Println("============================")
+			panic("??")
+		}
+	}()
+	fmt.Println(t.ToBeautySQL(0) + ";")
+	execs := t.ToExecuteStmts(10)
+	for _, e := range execs {
+		fmt.Println(e)
+	}
+	fmt.Println()
 }

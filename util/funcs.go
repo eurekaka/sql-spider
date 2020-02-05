@@ -134,7 +134,8 @@ const (
 func GenExprFromProbTable(tp TypeMask, level int) string {
 	// Col: 0.1, Cons: 0.1, All Funcs: 0.8
 	r := rand.Float64()
-	r *= math.Pow(0.8, float64(level))
+	// r *= math.Pow(0.8, float64(level))
+	r *= math.Pow(0.5, float64(level))
 	if r < 0.1 {
 		return Col
 	} else if r < 0.2 {
@@ -278,10 +279,25 @@ var FuncInfos = map[string]FuncInfo{
 	FuncLastDay:       {FuncLastDay, 1, 1, []TypeMask{TypeTime}, TypeTime, nil},
 }
 
+var SimpleFuncInfos = map[string]FuncInfo{
+	FuncEQ:            {FuncEQ, 2, 2, nil, TypeNumber, nil},
+	FuncGE:            {FuncGE, 2, 2, nil, TypeNumber, nil},
+	FuncLE:            {FuncLE, 2, 2, nil, TypeNumber, nil},
+	FuncNE:            {FuncNE, 2, 2, nil, TypeNumber, nil},
+	FuncLT:            {FuncLT, 2, 2, nil, TypeNumber, nil},
+	FuncGT:            {FuncGT, 2, 2, nil, TypeNumber, nil},
+	FuncIsTrue:        {FuncIsTrue, 1, 1, nil, TypeDefault, nil},
+	FuncLogicAnd:      {FuncLogicAnd, 2, 2, []TypeMask{TypeDefault, TypeDefault}, TypeDefault, nil},
+	FuncLogicOr:       {FuncLogicOr, 2, 2, []TypeMask{TypeDefault, TypeDefault}, TypeDefault, nil},
+	FuncPlus:          {FuncPlus, 2, 2, []TypeMask{TypeDefault, TypeDefault}, TypeDefault, nil},
+	FuncMinus:         {FuncMinus, 2, 2, []TypeMask{TypeDefault, TypeDefault}, TypeDefault, nil},
+}
+
 var funcList []string
 
 func init() {
-	for f := range FuncInfos {
+	// TODO for f := range FuncInfos {
+	for f := range SimpleFuncInfos {
 		funcList = append(funcList, f)
 	}
 }

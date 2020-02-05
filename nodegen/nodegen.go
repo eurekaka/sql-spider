@@ -23,16 +23,24 @@ func randomGenNode(level int, mask util.NodeTypeMask) util.Node {
 		Prop float64
 	}
 	var propTable []Entry
-	if level == 0 {
+	if false {
+	// if level == 0 {
 		propTable = []Entry {
-			{&util.OrderBy{}, 0.5},
+			// TODO unmask other types
+			//{&util.OrderBy{}, 0.5},
 			{&util.Limit{}, 0.5},
 		}
 	} else {
 		propTable = []Entry {
-			{&util.Join{}, 0.4 - 0.1*float64(level)},
-			{&util.Agg{}, 0.4 - 0.1*float64(level)},
+			//{&util.Join{}, 0.4 - 0.1*float64(level)},
+			//{&util.Agg{}, 0.4 - 0.1*float64(level)},
 			{&util.Table{}, 0.1 + 0.15*float64(level)},
+		}
+		if !mask.Contain(util.NTJoin) {
+			propTable = append(propTable, Entry{&util.Join{}, 0.4 - 0.1*float64(level)})
+		}
+		if !mask.Contain(util.NTAgg) {
+			propTable = append(propTable, Entry{&util.Agg{}, 0.4 - 0.1*float64(level)})
 		}
 		if !mask.Contain(util.NTProjector) {
 			propTable = append(propTable, Entry{&util.Projector{}, 0.2/* - 0.1*float64(level)*/})
@@ -40,12 +48,12 @@ func randomGenNode(level int, mask util.NodeTypeMask) util.Node {
 		if !mask.Contain(util.NTFilter) {
 			propTable = append(propTable, Entry{&util.Filter{}, 0.2/* + 0.15 *float64(level)*/})
 		}
-		if !mask.Contain(util.NTOrderBy) {
-			propTable = append(propTable, Entry{&util.OrderBy{}, 0.3/* - 0.1*float64(level)*/})
-		}
-		if !mask.Contain(util.NTLimit) && !mask.Contain(util.NTOrderBy) {
-			propTable = append(propTable, Entry{&util.Limit{}, 0.3/* - 0.1 * float64(level)*/})
-		}
+		//if !mask.Contain(util.NTOrderBy) {
+		//	propTable = append(propTable, Entry{&util.OrderBy{}, 0.3/* - 0.1*float64(level)*/})
+		//}
+		//if !mask.Contain(util.NTLimit) && !mask.Contain(util.NTOrderBy) {
+		//	propTable = append(propTable, Entry{&util.Limit{}, 0.3/* - 0.1 * float64(level)*/})
+		//}
 	}
 
 	var total float64
@@ -83,12 +91,12 @@ func (rn *RandomNodeGenerator) Generate(level int, mask util.NodeTypeMask) util.
 		//mask.Add(util.NTLimit | util.NTOrderBy)
 		//x.Children()[0].AddChild(rn.Generate(level+2, mask))
 	case *util.Agg:
-		mask.Remove(util.NTFilter | util.NTProjector | util.NTOrderBy | util.NTLimit)
-		mask.Add(util.NTAgg)
+		mask = mask.Remove(util.NTFilter | util.NTProjector | util.NTOrderBy | util.NTLimit)
+		mask = mask.Add(util.NTAgg)
 		x.AddChild(rn.Generate(level+1, mask))
 	case *util.Join:
-		mask.Remove(util.NTFilter | util.NTProjector | util.NTOrderBy | util.NTLimit)
-		mask.Add(util.NTJoin)
+		mask = mask.Remove(util.NTFilter | util.NTProjector | util.NTOrderBy | util.NTLimit)
+		mask = mask.Add(util.NTJoin)
 		x.AddChild(rn.Generate(level + 1, mask))
 		x.AddChild(rn.Generate(level + 1, mask))
 	}

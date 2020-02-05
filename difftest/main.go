@@ -5,14 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"flag"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/go-sql-driver/mysql"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/ngaut/log"
 	"github.com/zyguan/sql-spider/exprgen"
 	"github.com/zyguan/sql-spider/nodegen"
@@ -44,10 +44,10 @@ func main() {
 		trees   int
 		queries int
 	}
-	flag.StringVar(&opts.mysql, "mysql", "", "mysql dsn")
-	flag.StringVar(&opts.tidb, "tidb", "", "tidb dsn")
-	flag.IntVar(&opts.trees, "trees", 10, "number of tree")
-	flag.IntVar(&opts.queries, "queries", 5, "queries per tree")
+	flag.StringVar(&opts.mysql, "mysql", "root:@tcp(127.0.0.1:3306)/test", "mysql dsn")
+	flag.StringVar(&opts.tidb, "tidb", "root:@tcp(127.0.0.1:4000)/spider", "tidb dsn")
+	flag.IntVar(&opts.trees, "trees", 360, "number of tree")
+	flag.IntVar(&opts.queries, "queries", 10, "queries per tree")
 	flag.Parse()
 
 	mydb, err := sql.Open("mysql", opts.mysql)
@@ -67,14 +67,13 @@ func main() {
 	perror(err)
 	r.outInconsistency, err = os.OpenFile("out_diff.out", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	perror(err)
-
-	t := time.Now()
+	r.consistency, err = os.OpenFile("query.sql", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	perror(err)
 
 	for i, t := range trees {
 		log.Info("#", i)
 		r.Run(t)
 	}
-	log.Infof("%v %d %d %d %d", time.Now().Sub(t), cntErrMismatch, cntErrNotReported, cntErrUnexpected, cntContentMismatch)
 }
 
 func perror(err error) {
@@ -86,85 +85,106 @@ func perror(err error) {
 type Runner struct {
 	errInconsistency io.Writer
 	outInconsistency io.Writer
+	consistency io.Writer
 
 	mydb *sql.DB
 	tidb *sql.DB
 }
 
+var debug = true
+
 func (r *Runner) Run(t util.Tree) {
-	q := t.ToBeautySQL(0)
+	prep := t.ToBeautySQL(0)
+	execs := t.ToExecuteStmts(10)
+	if debug {
+		fmt.Println(prep + ";")
+		for _, e := range execs {
+			fmt.Println(e)
+		}
+		return
+	}
 	ctx := context.Background()
-	ctx1, _ := context.WithTimeout(ctx, 10*time.Second)
-	expRows, expErr := r.mydb.QueryContext(ctx1, q)
-	ctx2, _ := context.WithTimeout(ctx, 10*time.Second)
-	actRows, actErr := r.tidb.QueryContext(ctx2, q)
-	if expErr != nil && actErr != nil {
-		if expErr.Error() != actErr.Error() {
-			e1, ok1 := expErr.(*mysql.MySQLError)
-			e2, ok2 := actErr.(*mysql.MySQLError)
-			if ok1 && ok2 && e1.Number != e2.Number {
-				log.Error(e1, "<>", e2)
-				cntErrMismatch += 1
+	_, prepareExpErr := r.mydb.ExecContext(ctx, prep)
+	_, prepareActErr := r.tidb.ExecContext(ctx, prep)
+	if prepareExpErr != nil || prepareActErr != nil {
+		log.Infof("prepare fails")
+		return
+	}
+	prepareSuccLogged := false
+	prepareFailLogged := false
+	for i := 0; i < len(execs); i = i + 2 {
+		_, setExpErr := r.mydb.ExecContext(ctx, execs[i])
+		_, setActErr := r.tidb.ExecContext(ctx, execs[i])
+		if setExpErr != nil || setActErr != nil {
+			log.Infof("set fails %d", i)
+			log.Error(setExpErr)
+			log.Error(setActErr)
+			continue
+		}
+		if debug {
+			fmt.Println("index", i)
+		}
+		expRows, expErr := r.mydb.QueryContext(ctx, execs[i+1])
+		if debug {
+			fmt.Println("mysql query finishes")
+		}
+		actRows, actErr := r.tidb.QueryContext(ctx, execs[i+1])
+		if expErr == nil && actErr == nil {
+			expBR, err := dumpToByteRows(expRows)
+			if err != nil {
+				log.Infof("dump fails")
+				if expRows != nil {
+					expRows.Close()
+				}
+				if actRows != nil {
+					actRows.Close()
+				}
+				continue
 			}
-			r.errInconsistency.Write([]byte("========================================\n> SQL\n"))
-			r.errInconsistency.Write([]byte(q))
-			r.errInconsistency.Write([]byte("\n> EXPECT\n"))
-			r.errInconsistency.Write([]byte(expErr.Error()))
-			r.errInconsistency.Write([]byte("\n> ACTUAL\n"))
-			r.errInconsistency.Write([]byte(actErr.Error()))
-			r.errInconsistency.Write([]byte("\n"))
-		} else {
-			log.Error(expErr.Error() + "\nSQL: \n" + q)
+			actBR, err := dumpToByteRows(actRows)
+			if err != nil {
+				log.Infof("dump fails")
+				if expRows != nil {
+					expRows.Close()
+				}
+				if actRows != nil {
+					actRows.Close()
+				}
+				continue
+			}
+			if compareByteRows(expBR, actBR) {
+				if !prepareSuccLogged {
+					prepareSuccLogged = true
+					r.consistency.Write([]byte("\n"))
+					r.consistency.Write([]byte(prep))
+					r.consistency.Write([]byte(";"))
+					r.consistency.Write([]byte("\n"))
+				}
+				r.consistency.Write([]byte(execs[i]))
+				r.consistency.Write([]byte("\n"))
+				r.consistency.Write([]byte(execs[i+1]))
+				r.consistency.Write([]byte("\n"))
+				log.Infof("test query found")
+			} else {
+				if !prepareFailLogged {
+					prepareFailLogged = true
+					r.outInconsistency.Write([]byte("\n"))
+					r.outInconsistency.Write([]byte(prep))
+					r.outInconsistency.Write([]byte(";"))
+					r.outInconsistency.Write([]byte("\n"))
+				}
+				r.outInconsistency.Write([]byte(execs[i]))
+				r.outInconsistency.Write([]byte("\n"))
+				r.outInconsistency.Write([]byte(execs[i+1]))
+				r.outInconsistency.Write([]byte("\n"))
+				log.Infof("different execute results %d", i)
+			}
 		}
-	} else if expErr != nil && actErr == nil {
-		cntErrNotReported += 1
-		log.Error(expErr)
-		defer actRows.Close()
-		r.errInconsistency.Write([]byte("========================================\n> SQL\n"))
-		r.errInconsistency.Write([]byte(q))
-		r.errInconsistency.Write([]byte("\n> EXPECT\n"))
-		r.errInconsistency.Write([]byte(expErr.Error()))
-		r.errInconsistency.Write([]byte("\n> ACTUAL\n"))
-		r.errInconsistency.Write([]byte("NO ERROR"))
-		r.errInconsistency.Write([]byte("\n"))
-	} else if expErr == nil && actErr != nil {
-		cntErrUnexpected += 1
-		log.Error(actErr)
-		defer expRows.Close()
-		expBR, err := dumpToByteRows(expRows)
-		if err != nil {
-			log.Error(err)
-			return
+		if expRows != nil {
+			expRows.Close()
 		}
-		r.outInconsistency.Write([]byte("========================================\n> SQL\n"))
-		r.outInconsistency.Write([]byte(q))
-		r.outInconsistency.Write([]byte("\n> EXPECT\n"))
-		r.outInconsistency.Write([]byte(expBR.convertToString()))
-		r.outInconsistency.Write([]byte("\n> ACTUAL\n"))
-		r.outInconsistency.Write([]byte(actErr.Error()))
-		r.outInconsistency.Write([]byte("\n"))
-	} else {
-		defer expRows.Close()
-		defer actRows.Close()
-		expBR, err := dumpToByteRows(expRows)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-		actBR, err := dumpToByteRows(actRows)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-		if !compareByteRows(expBR, actBR) {
-			cntContentMismatch += 1
-			r.outInconsistency.Write([]byte("========================================\n> SQL\n"))
-			r.outInconsistency.Write([]byte(q))
-			r.outInconsistency.Write([]byte("\n> EXPECT\n"))
-			r.outInconsistency.Write([]byte(expBR.convertToString()))
-			r.outInconsistency.Write([]byte("\n> ACTUAL\n"))
-			r.outInconsistency.Write([]byte(actBR.convertToString()))
-			r.outInconsistency.Write([]byte("\n"))
+		if actRows != nil {
+			actRows.Close()
 		}
 	}
 }

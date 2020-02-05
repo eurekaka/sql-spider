@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"math/rand"
 	"time"
 
@@ -25,28 +24,14 @@ func getTableSchemas() util.TableSchemas {
 
 func main() {
 	ts := getTableSchemas()
-	emptyTrees := nodegen.GenerateNode(10)
+	emptyTrees := nodegen.GenerateNode(5)
 	var trees []util.Tree
 	for _, et := range emptyTrees {
 		trees = append(trees, exprgen.GenExprTrees(et, ts, 3)...)
 	}
 	for _, t := range trees {
-		safePrint(t)
+		util.SafePrint(t)
 	}
-}
-
-func safePrint(t util.Tree) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("============================")
-			fmt.Println(t.ToString())
-			fmt.Println("============================")
-			panic("??")
-		}
-	}()
-	//fmt.Println(t.ToSQL())
-	fmt.Println(t.ToBeautySQL(0) + ";")
-	fmt.Println()
 }
 
 func init() {

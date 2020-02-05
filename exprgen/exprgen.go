@@ -20,15 +20,29 @@ func GenExprTrees(tree util.Tree, ts util.TableSchemas, n int) []util.Tree {
 	trees := make([]util.Tree, 0, n)
 	for i := 0; i < n; i++ {
 		t := tree.Clone()
-		fillNode(t, ts, true)
-		trees = append(trees, t)
+		fillNode(t, ts)
+		if calcParamCnt(t, true) > 0 {
+			trees = append(trees, t)
+			break
+		}
 	}
 	return trees
 }
 
-func fillNode(node util.Node, ts util.TableSchemas, isRoot bool) {
+func calcParamCnt(node util.Node, isRoot bool) (cnt int) {
 	for _, child := range node.Children() {
-		fillNode(child, ts, false)
+		cnt += calcParamCnt(child, false)
+	}
+	cnt += node.ParamCnt()
+	if isRoot {
+		node.SetParamCnt(cnt)
+	}
+	return
+}
+
+func fillNode(node util.Node, ts util.TableSchemas) {
+	for _, child := range node.Children() {
+		fillNode(child, ts)
 	}
 	switch x := node.(type) {
 	case *util.Table:
@@ -79,7 +93,9 @@ func fillProj(p *util.Projector) {
 	}
 	p.Projections = make([]util.Expr, nProjected)
 	for i := 0; i < nProjected; i++ {
-		p.Projections[i] = util.GenExpr(cols, util.TypeDefault, util.MustContainCols)
+		proj, cnt := util.GenExpr(cols, util.TypeDefault, util.MustContainCols)
+		p.Projections[i] = proj
+		p.SetParamCnt(cnt + p.ParamCnt())
 	}
 }
 
@@ -96,10 +112,14 @@ func fillAgg(a *util.Agg) {
 	for i := nCols - aggCols; i < nCols; i++ {
 		col := cols[i]
 		expr := &util.Func{Name: util.GetAggExprFromPropTable()}
-		//expr.AppendArg(col)
+		paramExpr := &util.Func{Name: expr.Name}
 		expr.AppendArg(util.NewColumn("c"+strconv.Itoa(i), col.RetType()))
-		expr.SetRetType(util.TypeMask(util.AggRetType(expr.Name, col)))
-		a.AggExprs = append(a.AggExprs, expr)
+		paramExpr.AppendArg(util.NewConstant("?", col.RetType()))
+		tp := util.TypeMask(util.AggRetType(expr.Name, col))
+		expr.SetRetType(tp)
+		paramExpr.SetRetType(tp)
+		a.AggExprs = append(a.AggExprs, expr, paramExpr)
+		a.SetParamCnt(a.ParamCnt() + 1)
 	}
 }
 
@@ -112,7 +132,9 @@ func fillFilter(f *util.Filter) {
 	for i, c := range f.Children()[0].Columns() {
 		cols = append(cols, util.NewColumn(fmt.Sprintf("c%v", i), c.RetType()))
 	}
-	f.Where = util.GenExpr(cols, util.TypeNumber, util.MustContainCols)
+	expr, cnt := util.GenExpr(cols, util.TypeNumber, util.MustContainCols)
+	f.Where = expr
+	f.SetParamCnt(cnt + f.ParamCnt())
 }
 
 func buildJoinCond(lCols []util.Expr, rCols []util.Expr) util.Expr {
